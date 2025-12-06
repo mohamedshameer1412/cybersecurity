@@ -1,0 +1,57 @@
+WINDOWS AUTO HARDENING PS1 SCRIPT
+Save as win_secure.ps1 → Run as Administrator.
+
+# PASSWORD POLICY
+secedit /export /cfg temp.cfg
+(gc temp.cfg) -replace "MinimumPasswordLength = \d+", "MinimumPasswordLength = 12" | Out-File temp.cfg
+(gc temp.cfg) -replace "PasswordHistorySize = \d+", "PasswordHistorySize = 5" | Out-File temp.cfg
+(gc temp.cfg) -replace "MaximumPasswordAge = \d+", "MaximumPasswordAge = 45" | Out-File temp.cfg
+(gc temp.cfg) -replace "MinimumPasswordAge = \d+", "MinimumPasswordAge = 3" | Out-File temp.cfg
+secedit /configure /db temp.sdb /cfg temp.cfg
+
+# AUDIT POLICY
+auditpol /set /category:"Account Logon" /success:enable /failure:enable
+auditpol /set /category:"Logon/Logoff" /success:enable /failure:enable
+
+# SMB & TLS HARDEN
+Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol
+
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Server" /v Enabled /t REG_DWORD /d 0 /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server" /v Enabled /t REG_DWORD /d 1 /f
+
+Write-Host "Windows Hardening Completed ✔"
+
+
+
+------------------------------------------------------------------------------------------------------------------------------------
+
+LINUX FULL SECURE SCRIPT
+Save as linux_secure.sh → Run as root
+
+#!/bin/bash
+
+# SSH Securing
+sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
+echo "Unauthorized Access is Prohibited" > /etc/issue.net
+systemctl restart sshd
+
+# Firewall
+ufw enable
+ufw allow 22
+ufw default deny incoming
+
+# Snort ICMP Rule
+echo 'alert icmp any any -> $HOME_NET any (msg:"ICMP Detected"; sid:10001; rev:1;)' >> /etc/snort/rules/local.rules
+systemctl restart snort
+
+echo "Linux Hardening Complete ✔"
+
+cheetsheet
+https://chatgpt.com/share/693445e3-f654-800d-a8b3-95d84c2b1559
+
+https://chatgpt.com/share/6933fbed-dfc8-8002-95ca-2ad99de7e989
+https://chatgpt.com/share/6933ee24-d7bc-8002-ad58-ce5f632530d8
+
+report making
+https://chatgpt.com/share/693466f8-4da4-800d-a2d9-62f4c0a27cbb
