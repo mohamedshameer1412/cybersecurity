@@ -1,0 +1,169 @@
+windows hardening .ps1
+
+<#
+  windows_hardening.ps1
+  PRIORITY-1: Password policy, lockout, audit, security options, USB, SMBv1, TLS.
+#>
+
+Write-Host "=== WINDOWS HARDENING START ===`n"
+
+############################
+# 1) PASSWORD & LOCKOUT
+############################
+
+Write-Host "[*] Setting password and account lockout policy..."
+
+# Password & lockout via net accounts
+net accounts /minpwlen:12 /maxpwage:45 /minpwage:3 /uniquepw:5 `
+    /lockoutthreshold:3 /lockoutwindow:99999 /lockoutduration:0 | Out-Null
+
+############################
+# 2) AUDIT POLICIES
+############################
+
+Write-Host "[*] Enabling advanced auditing for Credential & Kerberos..."
+
+# Credential validation
+auditpol /set /subcategory:"Credential Validation" /success:enable /failure:enable | Out-Null
+
+# Kerberos authentication service
+auditpol /set /subcategory:"Kerberos Authentication Service" /success:enable /failure:enable | Out-Null
+
+# Kerberos service ticket operations
+auditpol /set /subcategory:"Kerberos Service Ticket Operations" /success:enable /failure:enable | Out-Null
+
+# Other account logon events
+auditpol /set /subcategory:"Other Account Logon Events" /success:enable /failure:enable | Out-Null
+
+############################
+# 3) LOGIN RIGHTS BASICS
+# (Guest disabled, rest via GUI if needed)
+############################
+
+Write-Host "[*] Disabling Guest account..."
+
+# Disable Guest account
+net user guest /active:no | Out-Null
+
+############################
+# 4) SECURITY OPTIONS
+#   - Hide user info
+#   - Banner title & text
+#   - Disable USB storage
+############################
+
+Write-Host "[*] Applying Security Options (banner, hide user, USB disable)..."
+
+$sysPol = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+
+# Don’t display last username
+Set-ItemProperty -Path $sysPol -Name "dontdisplaylastusername" -Type DWord -Value 1
+
+# Do not display user info when locked (Windows 10/11: DontDisplayLockedUserId = 3 -> no one)
+Set-ItemProperty -Path $sysPol -Name "DontDisplayLockedUserId" -Type DWord -Value 3
+
+# Logon banner
+Set-ItemProperty -Path $sysPol -Name "legalnoticecaption" -Type String -Value "Welcome to OSDA!!!"
+Set-ItemProperty -Path $sysPol -Name "legalnoticetext" -Type String -Value "This system is restricted to authorized users only!"
+
+# Disable USB storage driver
+$usbStorKey = "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR"
+If (Test-Path $usbStorKey) {
+    Set-ItemProperty -Path $usbStorKey -Name "Start" -Type DWord -Value 4
+}
+
+############################
+# 5) PROTOCOL HARDENING
+#   - Disable SMBv1
+#   - Disable SSL2/3, TLS1.0/1.1
+#   - Enable TLS1.2
+############################
+
+Write-Host "[*] Disabling SMBv1..."
+Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -ErrorAction SilentlyContinue | Out-Null
+
+Write-Host "[*] Hardening SCHANNEL protocols (enable TLS1.2 only)..."
+
+$base = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols"
+
+# Helper function
+function Disable-ProtocolServer($name) {
+    $path = Join-Path $base "$name\Server"
+    if (!(Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+    New-ItemProperty -Path $path -Name "Enabled" -Value 0 -PropertyType "DWord" -Force | Out-Null
+}
+
+function Enable-ProtocolServer($name) {
+    $path = Join-Path $base "$name\Server"
+    if (!(Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+    New-ItemProperty -Path $path -Name "Enabled" -Value 1 -PropertyType "DWord" -Force | Out-Null
+}
+
+# Disable old stuff
+Disable-ProtocolServer "SSL 2.0"
+Disable-ProtocolServer "SSL 3.0"
+Disable-ProtocolServer "TLS 1.0"
+Disable-ProtocolServer "TLS 1.1"
+
+# Enable TLS1.2
+Enable-ProtocolServer "TLS 1.2"
+
+############################
+# 6) SHOW SUMMARY
+############################
+
+Write-Host "`n=== SUMMARY (raw values) ==="
+net accounts
+
+Write-Host "`nCurrent audit policy for Account Logon subcategories:"
+auditpol /get /category:"Account Logon"
+
+Write-Host "`nUSBSTOR service:"
+Get-ItemProperty -Path $usbStorKey | Select-Object Start
+
+Write-Host "`nSMBv1 feature status:"
+Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol | Select-Object FeatureName,State
+
+Write-Host "`nSCHANNEL TLS 1.2 setting:"
+Get-ItemProperty -Path (Join-Path $base "TLS 1.2\Server") | Select-Object Enabled
+
+Write-Host "`n=== WINDOWS HARDENING DONE (reboot recommended) ==="
+
+
+----------------
+
+
+windows hardening test .ps1
+
+<#
+  windows_hardening_test.ps1
+  Quick checks to prove to judges that your config is applied.
+#>
+
+Write-Host "=== WINDOWS HARDENING TEST ===`n"
+
+Write-Host "[*] Password & lockout:"
+net accounts
+Write-Host ""
+
+Write-Host "[*] Guest account status:"
+net user guest
+Write-Host ""
+
+Write-Host "[*] Account logon audit policy:"
+auditpol /get /category:"Account Logon"
+Write-Host ""
+
+Write-Host "[*] SMBv1 status:"
+Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol | Format-List
+Write-Host ""
+
+Write-Host "[*] USBSTOR service:"
+Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\USBSTOR" | Select-Object Start
+Write-Host ""
+
+Write-Host "[*] SCHANNEL TLS settings (TLS 1.2):"
+Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Server" | Select-Object Enabled
+Write-Host ""
+
+Write-Host "Now manually test: wrong password (lockout), logon/logoff, plug USB, and check Event Viewer → Security logs."
