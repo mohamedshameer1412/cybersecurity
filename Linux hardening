@@ -1,0 +1,187 @@
+linus hardening .sh
+
+#!/usr/bin/env bash
+# linux_hardening.sh
+# PRIORITY-2 + PRIORITY-3 + part of PRIORITY-4
+
+set -e
+
+echo "=== LINUX HARDENING START ==="
+
+############################
+# 1) SSH HARDENING
+############################
+
+SSHD_CONFIG="/etc/ssh/sshd_config"
+
+echo "[*] Backing up sshd_config..."
+cp "$SSHD_CONFIG" "${SSHD_CONFIG}.bak.$(date +%s)"
+
+echo "[*] Enforcing key-only auth, disabling password & root login..."
+
+# Ensure directives exist and are correct
+sed -i 's/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD_CONFIG" || echo "PasswordAuthentication no" >> "$SSHD_CONFIG"
+sed -i 's/^[#[:space:]]*PubkeyAuthentication.*/PubkeyAuthentication yes/' "$SSHD_CONFIG" || echo "PubkeyAuthentication yes" >> "$SSHD_CONFIG"
+sed -i 's/^[#[:space:]]*PermitRootLogin.*/PermitRootLogin no/' "$SSHD_CONFIG" || echo "PermitRootLogin no" >> "$SSHD_CONFIG"
+
+# Banner
+sed -i 's|^[#[:space:]]*Banner.*|Banner /etc/issue.net|' "$SSHD_CONFIG" || echo "Banner /etc/issue.net" >> "$SSHD_CONFIG"
+
+echo "Unauthorized Access is prohibited!" > /etc/issue.net
+
+echo "[*] Testing sshd config and restarting..."
+sshd -t
+systemctl restart sshd
+
+############################
+# 2) NGINX HTTPS CONFIG
+############################
+
+echo "[*] Setting up self-signed certificate for NGINX..."
+
+SSL_DIR="/etc/nginx/ssl"
+mkdir -p "$SSL_DIR"
+
+if [ ! -f "$SSL_DIR/nginx-selfsigned.key" ]; then
+  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout "$SSL_DIR/nginx-selfsigned.key" \
+    -out "$SSL_DIR/nginx-selfsigned.crt" \
+    -subj "/C=IN/ST=TN/L=Chennai/O=OSDA/OU=Cyber/CN=localhost"
+fi
+
+NGINX_DEFAULT="/etc/nginx/sites-available/default"
+echo "[*] Backing up NGINX default site..."
+cp "$NGINX_DEFAULT" "${NGINX_DEFAULT}.bak.$(date +%s)"
+
+cat > "$NGINX_DEFAULT" << 'EOF'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+
+    ssl_certificate     /etc/nginx/ssl/nginx-selfsigned.crt;
+    ssl_certificate_key /etc/nginx/ssl/nginx-selfsigned.key;
+
+    root /var/www/html;
+    index index.html index.htm;
+
+    server_name _;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+EOF
+
+echo "[*] Testing and reloading NGINX..."
+nginx -t
+systemctl reload nginx
+
+############################
+# 3) SNORT ICMP RULE
+############################
+
+echo "[*] Adding Snort ICMP rule..."
+
+SNORT_RULES="/etc/snort/rules/local.rules"
+cp "$SNORT_RULES" "${SNORT_RULES}.bak.$(date +%s)"
+
+# Avoid duplicate
+grep -q "sid:1001;" "$SNORT_RULES" || echo 'alert icmp any any -> $HOME_NET any (msg:"ICMP Traffic Detected"; sid:1001; rev:1;)' >> "$SNORT_RULES"
+
+systemctl restart snort || systemctl restart snort@eth0.service || true
+
+############################
+# 4) FIREWALL (UFW)
+############################
+
+echo "[*] Configuring UFW firewall..."
+
+ufw --force enable
+ufw allow 22/tcp
+ufw allow 443/tcp
+# If you still want HTTP separately:
+# ufw allow 80/tcp
+ufw default deny incoming
+ufw default allow outgoing
+
+############################
+# 5) FILE PERMISSIONS
+############################
+
+echo "[*] Securing SSH authorized_keys permissions..."
+
+if [ -d "/home" ]; then
+  for u in /home/*; do
+    if [ -d "$u/.ssh" ]; then
+      chmod 700 "$u/.ssh"
+      [ -f "$u/.ssh/authorized_keys" ] && chmod 600 "$u/.ssh/authorized_keys"
+    fi
+  done
+fi
+
+echo "[*] Securing web root (basic)..."
+
+if [ -d "/var/www/html" ]; then
+  chown -R www-data:www-data /var/www/html
+  find /var/www/html -type d -exec chmod 750 {} \;
+  find /var/www/html -type f -exec chmod 640 {} \;
+fi
+
+echo "=== LINUX HARDENING COMPLETE ==="
+echo "Run linux_hardening_test.sh to verify."
+
+----------
+execution 
+
+chmod +x linux_hardening.sh
+sudo ./linux_hardening.sh
+
+----------
+
+Linux hardening test.sh
+
+#!/usr/bin/env bash
+# linux_hardening_test.sh
+# Shows status so you can screenshot for judges.
+
+echo "=== LINUX HARDENING TEST ==="
+
+echo "[*] SSHD relevant settings:"
+grep -E '^(PasswordAuthentication|PubkeyAuthentication|PermitRootLogin|Banner)' /etc/ssh/sshd_config || echo "No matches"
+echo
+
+echo "[*] Banner file:"
+cat /etc/issue.net
+echo
+
+echo "[*] UFW status:"
+ufw status verbose
+echo
+
+echo "[*] NGINX config test:"
+nginx -t
+echo
+
+echo "[*] Test HTTPS locally:"
+curl -k https://localhost/ -I || echo "curl test failed"
+echo
+
+echo "[*] Snort ICMP rule presence:"
+grep "ICMP Traffic Detected" /etc/snort/rules/local.rules || echo "Rule not found"
+echo
+
+echo "To fully test Snort, from another machine run: ping <SERVER_IP> then:"
+echo "  sudo tail -f /var/log/snort/alert"
+
+----------
+
+execution 
+
+chmod +x linux_hardening_test.sh
+sudo ./linux_hardening_test.sh
